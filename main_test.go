@@ -2,7 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseReality(t *testing.T) {
@@ -89,5 +93,39 @@ func TestKernelRoutes(t *testing.T) {
 	got = systemRoutes(options{all: true})
 	if len(got) != 4 || got[0] != "0.0.0.0/1" || got[1] != "128.0.0.0/1" {
 		t.Fatalf("system default routes: %v", got)
+	}
+}
+
+func TestCapabilityEnabled(t *testing.T) {
+	const netAdmin = 12
+	if !capabilityEnabled("Name:\ttest\nCapEff:\t0000000000001000\n", netAdmin) {
+		t.Fatal("CAP_NET_ADMIN should be enabled")
+	}
+	for _, status := range []string{
+		"Name:\ttest\nCapEff:\t0000000000000000\n",
+		"Name:\ttest\n",
+		"CapEff:\tnot-hex\n",
+	} {
+		if capabilityEnabled(status, netAdmin) {
+			t.Fatalf("CAP_NET_ADMIN should be disabled for %q", status)
+		}
+	}
+}
+
+func TestWaitForTUNReturnsWhenChildExits(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 23")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	signals := make(chan os.Signal)
+	start := time.Now()
+	err := waitForTUN(cmd, wait, signals, "vless-wan-test-does-not-exist")
+	if err == nil || !strings.Contains(err.Error(), "exited before creating") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("child exit took too long to observe: %s", elapsed)
 	}
 }

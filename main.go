@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -452,6 +453,11 @@ func parseNameServer(value string) (string, int, error) {
 }
 
 func runCore(config []byte, check bool, o options) error {
+	if !check {
+		if err := preflight(o); err != nil {
+			return err
+		}
+	}
 	dir, err := os.MkdirTemp("", "vless-wan-*")
 	if err != nil {
 		return err
@@ -485,24 +491,113 @@ func runCore(config []byte, check bool, o options) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	wait := make(chan error, 1)
+	go func() {
+		wait <- cmd.Wait()
+	}()
+	if err := waitForTUN(cmd, wait, signals, o.tun); err != nil {
+		return err
+	}
 	if err := installRoutes(o); err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
+		_ = stopChild(cmd, wait, syscall.SIGTERM)
 		return err
 	}
 	defer removeRoutes(o)
-	go func() {
-		sig := <-signals
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(sig)
-		}
-	}()
-	err = cmd.Wait()
+	select {
+	case err = <-wait:
+	case sig := <-signals:
+		_ = stopChild(cmd, wait, sig)
+		return nil
+	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 0 {
 		return nil
 	}
 	return err
+}
+
+func preflight(o options) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("unsupported operating system %s: Linux is required", runtime.GOOS)
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		return errors.New("iproute2 is required: the \"ip\" command was not found")
+	}
+	if info, err := os.Stat("/dev/net/tun"); err != nil {
+		return fmt.Errorf("TUN device is unavailable: %w", err)
+	} else if info.IsDir() {
+		return errors.New("TUN device is unavailable: /dev/net/tun is a directory")
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return fmt.Errorf("cannot inspect process capabilities: %w", err)
+	}
+	if !capabilityEnabled(string(status), 12) {
+		return errors.New("insufficient privileges: run as root or grant CAP_NET_ADMIN")
+	}
+	tun, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("cannot open /dev/net/tun: %w", err)
+	}
+	if err := tun.Close(); err != nil {
+		return fmt.Errorf("cannot close /dev/net/tun after preflight check: %w", err)
+	}
+	if _, err := net.InterfaceByName(o.tun); err == nil {
+		return fmt.Errorf("TUN interface %q already exists; stop the existing tunnel first", o.tun)
+	}
+	return nil
+}
+
+func capabilityEnabled(status string, bit uint) bool {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "CapEff:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
+		mask, err := strconv.ParseUint(value, 16, 64)
+		return err == nil && mask&(uint64(1)<<bit) != 0
+	}
+	return false
+}
+
+func waitForTUN(cmd *exec.Cmd, wait <-chan error, signals <-chan os.Signal, name string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case err := <-wait:
+			if err == nil {
+				return errors.New("Xray-core exited before creating the TUN interface")
+			}
+			return fmt.Errorf("Xray-core exited before creating the TUN interface: %w", err)
+		case sig := <-signals:
+			_ = stopChild(cmd, wait, sig)
+			return nil
+		case <-ticker.C:
+			if _, err := net.InterfaceByName(name); err == nil {
+				return nil
+			}
+		case <-timeout.C:
+			_ = stopChild(cmd, wait, syscall.SIGTERM)
+			return fmt.Errorf("timed out waiting for TUN interface %q", name)
+		}
+	}
+}
+
+func stopChild(cmd *exec.Cmd, wait <-chan error, sig os.Signal) error {
+	if cmd.Process == nil {
+		return nil
+	}
+	_ = cmd.Process.Signal(sig)
+	select {
+	case err := <-wait:
+		return err
+	case <-time.After(3 * time.Second):
+		_ = cmd.Process.Kill()
+		return <-wait
+	}
 }
 
 func kernelRoutes(o options) []string {
@@ -528,19 +623,6 @@ func systemRoutes(o options) []string {
 }
 
 func installRoutes(o options) error {
-	var lastErr error
-	for i := 0; i < 50; i++ {
-		if _, err := net.InterfaceByName(o.tun); err == nil {
-			lastErr = nil
-			break
-		} else {
-			lastErr = err
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if lastErr != nil {
-		return fmt.Errorf("TUN interface %s did not appear: %w", o.tun, lastErr)
-	}
 	for _, route := range systemRoutes(o) {
 		family := "-4"
 		if strings.Contains(route, ":") {

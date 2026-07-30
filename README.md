@@ -29,6 +29,10 @@ routes installed by `vless-wan`.
 - `ip` from iproute2 at runtime;
 - Go 1.22+, `curl`, `unzip`, and `sha256sum` when building from source.
 
+Before starting Xray, the wrapper verifies Linux support, `iproute2`,
+`/dev/net/tun`, `CAP_NET_ADMIN`, and TUN interface availability. Missing
+requirements produce an immediate error instead of waiting for Xray startup.
+
 ## Build
 
 ```sh
