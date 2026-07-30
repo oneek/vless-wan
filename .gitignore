@@ -1,0 +1,24 @@
+# Build output
+/dist/
+/bin/
+/vless-wan
+
+# Downloaded Xray payload
+/core/xray
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# Local configuration and credentials
+.env
+.env.*
+*.local
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+*~
