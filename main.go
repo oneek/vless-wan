@@ -22,7 +22,7 @@ import (
 //go:embed core/*
 var coreFiles embed.FS
 
-const version = "0.4.1"
+const version = "0.0.1"
 
 type listFlag []string
 
