@@ -150,3 +150,13 @@ submission.
 
 The wrapper is available under the MIT License. Embedded Xray-core is licensed
 separately under MPL-2.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Inspired by
+
+This project is inspired by tools that make transparent proxying and selective
+routing practical from the command line:
+
+- [sshuttle](https://github.com/sshuttle/sshuttle) — a transparent proxy and
+  VPN-like tool built around SSH;
+- [Wirez](https://github.com/v-byte-cpu/wirez) — a utility for redirecting TCP and
+  UDP traffic through a SOCKS5 proxy.
