@@ -8,8 +8,8 @@ The process stays in the foreground. Press `Ctrl+C` to stop Xray and remove the
 routes installed by `vless-wan`.
 
 > [!WARNING]
-> This project is experimental networking software. Keep an SSH recovery
-> session open when testing it on a remote host.
+> This project is experimental networking software. Keep
+> console or out-of-band recovery access available when testing on a remote host.
 
 ## Features
 
@@ -25,7 +25,7 @@ routes installed by `vless-wan`.
 ## Requirements
 
 - Linux;
-- root privileges or equivalent TUN and route capabilities;
+- root privileges or equivalent TUN, route, and socket-mark capabilities;
 - `ip` from iproute2 at runtime;
 - Go 1.22+, `curl`, `unzip`, and `sha256sum` when building from source.
 
@@ -114,15 +114,66 @@ ip route get 203.0.113.1
 ip -6 route get 2001:db8::1
 ```
 
-Full-tunnel mode installs two split-default routes per address family. They are
-more specific than the existing default route without replacing it:
+### Routing and incoming services
 
-```text
-0.0.0.0/1
-128.0.0.0/1
-::/1
-8000::/1
+`vless-wan` leaves the main routing table unchanged. It creates a separate VPN
+routing table and policy rules for locally originated traffic, without nftables
+or conntrack. Full-tunnel mode uses a default route in that separate table;
+selected CIDRs use individual routes. New connections select the TUN source
+address when their destination is routed through the VPN.
+
+Packets with a source address belonging to an ordinary host interface use the
+main table. This keeps existing TCP sessions and replies from SSH, HTTP, and
+other services on their original network, including connections accepted after
+the VPN starts. Applications explicitly bound to an ordinary host IP also bypass
+the VPN. Connected local networks and CIDR exclusions remain direct. Domain
+exclusions are handled by Xray; Xray's own outbound sockets bypass the VPN using
+`SO_MARK` (`0x56000000`) and automatic outbound interface binding.
+
+To inspect the selected path, compare an unbound lookup with a lookup explicitly
+using your ordinary host IP:
+
+```sh
+ip route get 203.0.113.1
+ip route get 203.0.113.1 from YOUR_HOST_IP
+ip rule show
+ip -6 rule show
 ```
+
+This version supports one instance per network namespace, standard Linux policy
+rules, and stable host addresses/uplinks. Existing custom policy rules cause an
+error before routing is changed. Restart after host address or uplink changes.
+Forwarded traffic from containers or other machines is not routed into the VPN.
+This is not a kill switch: stopping the VPN restores ordinary outgoing routing.
+
+The wrapper selects an unused table in `20000..20099`. It logs each family's
+bypass priority range (starting at `10000`) and uses priority `32765` for VPN
+selection. Rules are removed before Xray stops, including on partial startup
+failure. Only the new TUN interface's reverse-path filtering is adjusted; global
+network sysctls are unchanged.
+
+### Recovery after an unclean exit
+
+`SIGKILL` prevents wrapper cleanup. The child normally terminates with its parent,
+and TUN routes disappear with the interface, but policy rules and direct-network
+`throw` routes can remain. A later launch rejects leftover policy rules.
+
+With no wrapper or Xray instance still running, inspect `ip -4 rule show` and
+`ip -6 rule show`. Remove only this instance's rules using its logged priorities,
+starting with the VPN selection rule:
+
+```sh
+sudo ip -4 rule del pref 32765
+sudo ip -6 rule del pref 32765
+# Repeat for each bypass priority logged for the corresponding family:
+sudo ip -4 rule del pref PRIORITY
+sudo ip -6 rule del pref PRIORITY
+# Use the table number logged by this instance:
+sudo ip -4 route flush table TABLE_ID
+sudo ip -6 route flush table TABLE_ID
+```
+
+Do not delete rules or flush tables owned by other software.
 
 ## Security notes
 
@@ -139,12 +190,17 @@ more specific than the existing default route without replacing it:
 
 - Domain-only routing depends on Xray protocol sniffing. Also provide CIDRs for
   applications using encrypted DNS or protocols without a sniffable hostname.
-- Abrupt power loss or `SIGKILL` prevents userspace cleanup. TUN-associated
-  routes normally disappear with the interface; inspect the routing table
-  before restarting.
+- Unclean termination may require policy-rule cleanup; see recovery above.
 - The release payload currently targets Linux amd64.
 
 ## Development
+
+Run `make verify` for formatting, race-enabled unit tests, and vet. Run
+`sudo make integration` for isolated IPv4/IPv6 routing and TCP/UDP tests; this
+requires `unshare` and `nsenter` from util-linux. With an embedded Xray payload,
+the suite also tests real TUN-to-VLESS forwarding and graceful shutdown, without
+accessing the public network. The integration test refuses to run in a namespace
+containing host interfaces.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports that may contain share
 links, UUIDs, server addresses, or encryption material must be sanitized before

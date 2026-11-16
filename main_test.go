@@ -90,10 +90,7 @@ func TestKernelRoutes(t *testing.T) {
 	if len(got) != 2 || got[0] != "0.0.0.0/0" || got[1] != "::/0" {
 		t.Fatalf("domain routes: %v", got)
 	}
-	got = systemRoutes(options{all: true})
-	if len(got) != 4 || got[0] != "0.0.0.0/1" || got[1] != "128.0.0.0/1" {
-		t.Fatalf("system default routes: %v", got)
-	}
+
 }
 
 func TestCapabilityEnabled(t *testing.T) {

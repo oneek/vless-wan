@@ -371,8 +371,16 @@ func makeConfig(vless map[string]any, o options) ([]byte, error) {
 			"type": "field", "network": "tcp,udp", "outboundTag": "direct",
 		})
 	}
+	// Mark every network outbound; the policy rule bypasses the VPN table.
+	stream, _ := vless["streamSettings"].(map[string]any)
+	if stream == nil {
+		stream = map[string]any{}
+		vless["streamSettings"] = stream
+	}
+	stream["sockopt"] = map[string]any{"mark": bypassMark}
 	outbounds := []any{vless, map[string]any{
 		"protocol": "freedom", "tag": "direct", "settings": map[string]any{},
+		"streamSettings": map[string]any{"sockopt": map[string]any{"mark": bypassMark}},
 	}}
 	dnsConfig := map[string]any{"servers": []any{"localhost"}}
 	if o.dns {
@@ -401,7 +409,6 @@ func makeConfig(vless map[string]any, o options) ([]byte, error) {
 			"settings": map[string]any{
 				"name": o.tun, "mtu": o.mtu,
 				"gateway":                []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"},
-				"autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"},
 				"autoOutboundsInterface": "auto",
 			},
 			"sniffing": map[string]any{
@@ -453,10 +460,20 @@ func parseNameServer(value string) (string, int, error) {
 }
 
 func runCore(config []byte, check bool, o options) error {
+	var network *networkSession
 	if !check {
 		if err := preflight(o); err != nil {
 			return err
 		}
+		if err := checkSocketMark(); err != nil {
+			return err
+		}
+		var err error
+		network, err = prepareNetwork(o, runIP)
+		if err != nil {
+			return err
+		}
+		defer network.close()
 	}
 	dir, err := os.MkdirTemp("", "vless-wan-*")
 	if err != nil {
@@ -498,14 +515,15 @@ func runCore(config []byte, check bool, o options) error {
 	if err := waitForTUN(cmd, wait, signals, o.tun); err != nil {
 		return err
 	}
-	if err := installRoutes(o); err != nil {
+	if err := network.activate(); err != nil {
+		network.cleanup()
 		_ = stopChild(cmd, wait, syscall.SIGTERM)
 		return err
 	}
-	defer removeRoutes(o)
 	select {
 	case err = <-wait:
 	case sig := <-signals:
+		network.cleanup()
 		_ = stopChild(cmd, wait, sig)
 		return nil
 	}
@@ -574,7 +592,7 @@ func waitForTUN(cmd *exec.Cmd, wait <-chan error, signals <-chan os.Signal, name
 			return fmt.Errorf("Xray-core exited before creating the TUN interface: %w", err)
 		case sig := <-signals:
 			_ = stopChild(cmd, wait, sig)
-			return nil
+			return fmt.Errorf("interrupted while waiting for TUN: %v", sig)
 		case <-ticker.C:
 			if _, err := net.InterfaceByName(name); err == nil {
 				return nil
@@ -605,47 +623,6 @@ func kernelRoutes(o options) []string {
 		return []string{"0.0.0.0/0", "::/0"}
 	}
 	return append([]string(nil), o.routes...)
-}
-
-func systemRoutes(o options) []string {
-	var routes []string
-	for _, route := range kernelRoutes(o) {
-		switch route {
-		case "0.0.0.0/0":
-			routes = append(routes, "0.0.0.0/1", "128.0.0.0/1")
-		case "::/0":
-			routes = append(routes, "::/1", "8000::/1")
-		default:
-			routes = append(routes, route)
-		}
-	}
-	return routes
-}
-
-func installRoutes(o options) error {
-	for _, route := range systemRoutes(o) {
-		family := "-4"
-		if strings.Contains(route, ":") {
-			family = "-6"
-		}
-		if output, err := exec.Command("ip", family, "route", "replace", route,
-			"dev", o.tun, "metric", "1").CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to install route %s: %v: %s",
-				route, err, strings.TrimSpace(string(output)))
-		}
-	}
-	return nil
-}
-
-func removeRoutes(o options) {
-	for _, route := range systemRoutes(o) {
-		family := "-4"
-		if strings.Contains(route, ":") {
-			family = "-6"
-		}
-		_ = exec.Command("ip", family, "route", "del", route,
-			"dev", o.tun, "metric", "1").Run()
-	}
 }
 
 func first(q url.Values, keys ...string) string {
