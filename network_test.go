@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -404,10 +405,20 @@ func TestPolicyRoutingIntegration(t *testing.T) {
 	ip("link", "del", "vpn0")
 	// Exercise the embedded Xray on both ends, with no public network dependency.
 	core, err := coreFiles.ReadFile("core/xray")
+	if errors.Is(err, os.ErrNotExist) {
+		if os.Getenv("VWAN_REQUIRE_XRAY") == "1" {
+			t.Fatal("embedded Xray is required")
+		}
+		t.Log("embedded Xray absent; skipping end-to-end portion")
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(core) < 1024*1024 {
+		if os.Getenv("VWAN_REQUIRE_XRAY") == "1" {
+			t.Fatal("embedded Xray is missing or incomplete")
+		}
 		t.Log("embedded Xray absent; skipping end-to-end portion")
 		return
 	}

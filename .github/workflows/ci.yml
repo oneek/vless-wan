@@ -25,5 +25,8 @@ jobs:
       - name: Verify formatting, tests, and vet
         run: make verify
 
+      - name: Build with embedded Xray
+        run: make build
+
       - name: Verify isolated policy routing
-        run: sudo env "PATH=$PATH" make integration
+        run: sudo env "PATH=$PATH" VWAN_REQUIRE_XRAY=1 make integration
