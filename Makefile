@@ -26,3 +26,8 @@ verify: fmt test vet
 
 clean:
 	rm -rf dist core/xray coverage.out
+
+# Requires root, iproute2, unshare, and nsenter. Runs only in a fresh namespace.
+.PHONY: integration
+integration:
+	unshare -n env VWAN_ROUTING_TEST=1 go test -count=1 -timeout=90s -run '^TestPolicyRoutingIntegration$$' -v .
